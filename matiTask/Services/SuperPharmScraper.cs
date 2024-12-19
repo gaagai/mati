@@ -30,20 +30,24 @@ namespace SuperPharmScraper.Services
                     // Load all branches
                     LoadAllBranches(driver, wait);
 
-                    // Collect store details
+                    // Collect all branch links and basic info
                     var storeLinks = CollectStoreLinks(driver);
 
-                    // Process each store link
+                    // Process each branch
                     foreach (var storeInfo in storeLinks)
                     {
                         try
                         {
                             var branchData = ProcessBranchDetails(driver, wait, storeInfo);
                             branches.Add(branchData);
+
+                            // Add a small delay to avoid overwhelming the server
+                            Thread.Sleep(1000);
                         }
                         catch (Exception ex)
                         {
                             Console.WriteLine($"Error processing branch {storeInfo.name}: {ex.Message}");
+                            continue;
                         }
                     }
                 }
@@ -57,10 +61,12 @@ namespace SuperPharmScraper.Services
             return branches;
         }
 
-        private List<(string name, string address, string status, string is24Hours, string city, string hours, string link)> CollectStoreLinks(IWebDriver driver)
+        private List<(string name, string address, string city, string link)> CollectStoreLinks(IWebDriver driver)
         {
-            var storeLinks = new List<(string name, string address, string status, string is24Hours, string city, string hours, string link)>();
+            var storeLinks = new List<(string name, string address, string city, string link)>();
+
             var storeElements = driver.FindElements(By.CssSelector("li.store"));
+            Console.WriteLine($"Found {storeElements.Count} branches on the main page.");
 
             foreach (var store in storeElements)
             {
@@ -68,14 +74,10 @@ namespace SuperPharmScraper.Services
                 {
                     var name = store.FindElement(By.CssSelector("h5.store-name")).Text.Trim();
                     var address = store.FindElement(By.CssSelector("p.store-address")).Text.Trim();
-                    var status = store.FindElements(By.CssSelector(".close-today")).Count > 0 ? "Closed" : "Open";
                     var city = address.Contains(",") ? address.Split(',')[1].Trim() : "Unknown";
-                    var hours = store.FindElements(By.CssSelector(".open-today-hour")).Count > 0
-                        ? store.FindElement(By.CssSelector(".open-today-hour")).Text.Trim()
-                        : "Unknown";
-                    var branchLink = store.FindElement(By.CssSelector("a")).GetAttribute("href");
+                    var link = store.FindElement(By.CssSelector("a")).GetDomAttribute("href");
 
-                    storeLinks.Add((name, address, status, "No", city, hours, branchLink));
+                    storeLinks.Add((name, address, city, link));
                 }
                 catch (Exception ex)
                 {
@@ -86,68 +88,83 @@ namespace SuperPharmScraper.Services
             return storeLinks;
         }
 
-        private BranchData ProcessBranchDetails(IWebDriver driver, WebDriverWait wait, (string name, string address, string status, string is24Hours, string city, string hours, string link) storeInfo)
+        private BranchData ProcessBranchDetails(IWebDriver driver, WebDriverWait wait, (string name, string address, string city, string link) storeInfo)
         {
             driver.Navigate().GoToUrl(storeInfo.link);
-            wait.Until(d => d.FindElement(By.CssSelector("#branchPage")));
+            wait.Until(d => d.FindElement(By.CssSelector(".branch-contact-and-hours-details")));
+            Thread.Sleep(1000);
 
-            var latitude = "0.0";
-            var longitude = "0.0";
+            string latitude = "0.0";
+            string longitude = "0.0";
 
             try
             {
-                var distanceElement = wait.Until(d => d.FindElement(By.CssSelector(".distance")));
-                latitude = distanceElement.GetAttribute("data-latitude");
-                longitude = distanceElement.GetAttribute("data-longitude");
+                var distanceElement = wait.Until(d => d.FindElement(By.CssSelector("div[data-latitude]")));
+                latitude = distanceElement.GetDomAttribute("data-latitude") ?? "0.0";
+                longitude = distanceElement.GetDomAttribute("data-longitude") ?? "0.0";
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Could not get coordinates for store {storeInfo.name}: {ex.Message}");
             }
 
+            string hours = "Not Available";
+            try
+            {
+                var hoursElement = driver.FindElement(By.CssSelector(".wrapper-opening-hours"));
+                if (hoursElement != null)
+                {
+                    hours = hoursElement.Text.Trim();
+                }
+            }
+            catch
+            {
+                Console.WriteLine($"No detailed hours found for {storeInfo.name}");
+            }
+
             return new BranchData
             {
                 Name = storeInfo.name,
                 Address = storeInfo.address,
-                Status = storeInfo.status,
-                Is24Hours = storeInfo.is24Hours,
                 City = storeInfo.city,
-                Hours = storeInfo.hours,
+                Hours = hours,
+                Latitude = latitude,
                 Longitude = longitude,
-                Latitude = latitude
+                Is24Hours = hours.Contains("00:00") ? "Yes" : "No"
             };
         }
 
         private void LoadAllBranches(IWebDriver driver, WebDriverWait wait)
         {
-            const int maxRetries = 3;
+            const int maxRetries = 5;
             int retryCount = 0;
 
             while (retryCount < maxRetries)
             {
                 try
                 {
-                    Thread.Sleep(1000);
-                    var loadMoreButton = wait.Until(d => d.FindElement(By.CssSelector(".btn-more")));
-
-                    if (!loadMoreButton.Displayed)
+                    var loadMoreButton = driver.FindElements(By.CssSelector(".btn-more")).FirstOrDefault();
+                    if (loadMoreButton == null || !loadMoreButton.Displayed)
+                    {
+                        Console.WriteLine("No more 'Load More' buttons found.");
                         break;
+                    }
 
+                    Console.WriteLine("Clicking 'Load More' button...");
                     ((IJavaScriptExecutor)driver).ExecuteScript("arguments[0].scrollIntoView(true);", loadMoreButton);
-                    Thread.Sleep(500);
-                    ((IJavaScriptExecutor)driver).ExecuteScript("arguments[0].click();", loadMoreButton);
-                    Thread.Sleep(1500);
-                }
-                catch (WebDriverTimeoutException)
-                {
-                    break;
+                    Thread.Sleep(1000);
+                    loadMoreButton.Click();
+                    Thread.Sleep(2000);
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Error loading more branches (attempt {retryCount + 1}): {ex.Message}");
+                    Console.WriteLine($"Error loading more branches: {ex.Message}");
                     retryCount++;
-                    if (retryCount >= maxRetries) break;
-                    Thread.Sleep(2000);
+                    if (retryCount >= maxRetries)
+                    {
+                        Console.WriteLine("Max retries reached for 'Load More' button.");
+                        break;
+                    }
                 }
             }
         }
